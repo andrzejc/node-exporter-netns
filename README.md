@@ -25,7 +25,8 @@ directory as an invalid `--path.procfs` ([prometheus/node_exporter#3917](https:/
 | udp_queues | `udp`, `udp6` | `node_udp_queues{ip,queue}` |
 
 plus `node_scrape_collector_success` and `node_scrape_collector_duration_seconds` per collector. A collector that fails
-reports `success 0`; the others keep working.
+reports `success 0` and logs the reason to stderr; the others keep working. On hosts with IPv6 disabled the IPv6 files
+are absent and skipped, as node_exporter does.
 
 Checked against node_exporter v1.12.1 with the same collectors on the same host: identical metric names, labels, types
 and help texts, values equal within the counters' movement between the two reads.
@@ -63,3 +64,16 @@ Environment: `LISTEN_PORT` (default `9100`), `NET_DIR` (default `/host/proc/1/ne
 
 `conntrack` (reads `/proc/sys/net`, which has no per-process view) and `netclass` (sysfs, not namespaced; node_exporter
 can keep it). No TLS or authentication: keep the port on an internal network.
+
+## Development
+
+```
+python -m unittest discover -s tests -v
+ruff check . && mypy node_exporter_netns.py tests/test_exporter.py
+```
+
+The parity tests run the exporter on fixed trees under `tests/fixtures/<case>/net` and compare every sample, HELP and
+TYPE line with `tests/golden/<case>.prom`, which `tools/make-golden.sh` produces with node_exporter v1.12.1 (Docker) from
+the same files. Cases: `full` (a real host, addresses anonymised), `no-ipv6`, `edge` (a device name with a quote and a
+backslash, no ARP entries, UDP sockets with queued data). To cover a new case, add a fixture directory and rerun the
+script.
