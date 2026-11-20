@@ -1,0 +1,16 @@
+# Example: host network statistics without host networking. Scrape node-exporter-netns:9100 from the same network.
+services:
+  node-exporter-netns:
+    image: python:3.13-alpine   # pin an exact version in production
+    container_name: node-exporter-netns
+    restart: unless-stopped
+    command: [python, /app/node_exporter_netns.py]
+    user: "65534:65534"  # nobody: the files under /proc/1/net are world-readable
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      PYTHONDONTWRITEBYTECODE: 1
+    volumes:
+      - ./node_exporter_netns.py:/app/node_exporter_netns.py:ro
+      - /proc:/host/proc:ro
