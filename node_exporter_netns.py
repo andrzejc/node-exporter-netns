@@ -20,6 +20,8 @@ Usage: node_exporter_netns.py   (listens on $LISTEN_PORT, default 9100; reads $N
 """
 import os
 import re
+import signal
+import sys
 import time
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -49,13 +51,25 @@ class Out:
         if name not in self.seen:
             self.seen.add(name)
             self.lines += [f"# HELP {name} {help_}", f"# TYPE {name} {kind}"]
-        lab = ",".join(f'{k}="{v}"' for k, v in (labels or {}).items())
+        lab = ",".join(f'{k}="{escape(v)}"' for k, v in (labels or {}).items())
         self.lines.append(f"{name}{{{lab}}} {value!r}" if lab else f"{name} {value!r}")
+
+
+def escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 def read(name: str) -> list[str]:
     with open(os.path.join(NET_DIR, name)) as f:
         return f.read().splitlines()
+
+
+def read_ipv6(name: str) -> list[str] | None:
+    """The IPv6 files (snmp6, sockstat6, udp6) are missing when IPv6 is disabled; node_exporter skips them then."""
+    try:
+        return read(name)
+    except FileNotFoundError:
+        return None
 
 
 def netdev(out: Out) -> None:
@@ -77,11 +91,11 @@ def netstat(out: Out) -> None:
     stats: dict[str, float] = {}
     for name in ("netstat", "snmp"):
         lines = read(name)
-        for header, values in zip(lines[::2], lines[1::2]):  # "Proto: Field ..." then "Proto: value ..."
+        for header, values in zip(lines[::2], lines[1::2], strict=True):  # "Proto: Field ..." then "Proto: value ..."
             proto, *fields = header.split()
-            for field, value in zip(fields, values.split()[1:]):
+            for field, value in zip(fields, values.split()[1:], strict=True):
                 stats[f"{proto[:-1]}_{field}"] = float(value)
-    for line in read("snmp6"):
+    for line in read_ipv6("snmp6") or []:
         key, value = line.split()
         m = re.match(r"^([A-Za-z]+6)(.+)$", key)  # Ip6InOctets, Udp6NoPorts, UdpLite6InErrors
         if m:
@@ -93,14 +107,14 @@ def netstat(out: Out) -> None:
 
 def sockstat(out: Out) -> None:
     values: dict[str, tuple[str, float]] = {}
-    for name in ("sockstat", "sockstat6"):
-        for line in read(name):
+    for lines in (read("sockstat"), read_ipv6("sockstat6") or []):
+        for line in lines:
             proto, _, rest = line.partition(":")
             words = rest.split()
             if proto == "sockets":  # "sockets: used N"
                 values["sockets_used"] = ("Number of IPv4 sockets in use.", float(words[1]))
                 continue
-            for field, value in zip(words[::2], words[1::2]):
+            for field, value in zip(words[::2], words[1::2], strict=True):
                 values[f"{proto}_{field}"] = (f"Number of {proto} sockets in state {field}.", float(value))
                 if field == "mem":  # in pages
                     values[f"{proto}_mem_bytes"] = (f"Number of {proto} sockets in state mem_bytes.", float(value) * PAGE_SIZE)
@@ -118,9 +132,11 @@ def arp(out: Out) -> None:
 
 
 def udp_queues(out: Out) -> None:
-    for ip, name in (("v4", "udp"), ("v6", "udp6")):
+    for ip, lines in (("v4", read("udp")), ("v6", read_ipv6("udp6"))):
+        if lines is None:
+            continue
         tx = rx = 0
-        for line in read(name)[1:]:
+        for line in lines[1:]:
             t, r = line.split()[4].split(":")  # tx_queue:rx_queue, hex
             tx, rx = tx + int(t, 16), rx + int(r, 16)
         for queue, value in (("rx", rx), ("tx", tx)):
@@ -139,7 +155,7 @@ def metrics() -> str:
         try:
             collect(out)
         except (OSError, ValueError, IndexError) as e:  # one broken file must not take the other collectors down
-            print(f"{name}: {e!r}", flush=True)
+            print(f"{name}: {e!r}", file=sys.stderr, flush=True)
             ok = 0.0
         result[name] = (time.monotonic() - start, ok)
     for name in sorted(result):
@@ -172,5 +188,12 @@ class Handler(BaseHTTPRequestHandler):
         pass  # one line per scrape is noise
 
 
-if __name__ == "__main__":
+def main() -> None:
+    # As PID 1 in a container, Python ignores SIGTERM (no default action for PID 1): `docker stop` would wait its 10 s
+    # and SIGKILL. Exit cleanly instead.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
     ThreadingHTTPServer(("", PORT), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()
