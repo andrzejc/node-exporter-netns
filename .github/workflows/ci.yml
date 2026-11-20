@@ -1,0 +1,22 @@
+# Lint, type-check and test on every push and pull request. The parity tests compare against tests/golden, which
+# tools/make-golden.sh produces with node_exporter v1.12.1 (Docker); CI only reads the committed files.
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install ruff==0.16.9 mypy==2.3.1
+      - run: ruff check .
+      - run: mypy node_exporter_netns.py tests/test_exporter.py
+      - run: python -m unittest discover -s tests -v
